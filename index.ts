@@ -31,6 +31,36 @@ app.get('/api/data', (req, res) => {
   });
 });
 
+app.post('/api/login', (req, res) => {
+  console.log('Received login request:', req.body);
+  const { username, password } = req.body;
+
+
+  // Query to find the user
+  const query = 'SELECT * FROM users WHERE username = ? AND password = ?';
+  db.execute(query, [username, password], (err, results) => {
+    if (err) {
+      console.log('Error querying user:', err);
+      return res.status(500).json({ message: 'Error querying user' });
+    }
+
+    if ((results as mysql.RowDataPacket[]).length === 0) {
+      console.log('Invalid credentials');
+      return res.status(401).json({ message: 'Invalid credentials' });
+    }
+
+    // User found, return user data
+    const user = (results as mysql.RowDataPacket[])[0];
+    console.log('User logged in successfully:', user);
+    res.status(200).json({
+      message: 'Login successful',
+      userId: user.id,
+      username: user.username,
+      email: user.email,
+    });
+  });
+});
+
 app.post('/api/register', (req, res) => {
   console.log('Received registration request:', req.body);
   const { username, email, password } = req.body;
