@@ -1,6 +1,7 @@
 import express, { Request, Response } from 'express';
 import mysql from 'mysql2';
 import cors from 'cors';
+import Server from './server';
 
 const app = express();
 const PORT = 3001;
@@ -8,6 +9,11 @@ const PORT = 3001;
 app.use(cors());
 express.urlencoded({ extended: true });
 app.use(express.json());
+
+import WebSocket, { WebSocketServer } from 'ws';
+const wss = new WebSocketServer({ port: 3002 });
+
+let servers: Server[] = [];
 
 const db = mysql.createConnection({
   host: 'localhost',
@@ -24,6 +30,90 @@ db.connect(err => {
   console.log('Connected to MySQL');
 });
 
+//#region WebSocket Server
+wss.on('connection', (ws: WebSocket) => {
+
+  ws.on('message', (message: string) => {
+    let data = JSON.parse(message);
+    console.log('Received message:', data);
+    switch (data.type) {
+      case 'createServer':
+        const newServer = new Server();
+        newServer.serverId = servers.length + 1;
+        newServer.hostId = data.hostId;
+        newServer.quizId = data.quizId;
+        newServer.timeLimit = data.timeLimit || 30; // Default to 30 seconds if not provided
+        newServer.Setup(); // Load questions and answers from the database
+        newServer.saveServerToDatabase();
+        servers.push(newServer);
+        ws.send(JSON.stringify({ type: 'serverCreated', serverId: newServer.serverId }));
+        console.log(`New server created with ID: ${newServer.serverId}`);
+        break;
+
+      case 'joinServer':
+        const server = servers.find(s => s.serverId === data.serverId);
+        if (server) {
+          server.addPlayer(data.playerId);
+          ws.send(JSON.stringify({ type: 'joinedServer', serverId: server.serverId, playerList: server.playerList }));
+          console.log(`Player ${data.playerId} joined server ${server.serverId}`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
+      case 'nextQuestion':
+        const currentServer = servers.find(s => s.serverId === data.serverId);
+        if (currentServer) {
+          currentServer.nextQuestion();
+          ws.send(JSON.stringify({ type: 'nextQuestion', questionIndex: currentServer.currentQuestion }));
+          console.log(`Next question for server ${currentServer.serverId}: ${currentServer.currentQuestion}`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
+      case 'playerAnswer':
+        const answerServer = servers.find(s => s.serverId === data.serverId);
+        if (answerServer) {
+          answerServer.playerAnswer(data.playerId, data.answer);
+          ws.send(JSON.stringify({ type: 'answerReceived', playerId: data.playerId, answer: data.answer }));
+          console.log(`Player ${data.playerId} answered question ${answerServer.currentQuestion} with answer ${data.answer}`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
+      case 'curTime':
+        const timeServer = servers.find(s => s.serverId === data.serverId);
+        if (timeServer) {
+          ws.send(JSON.stringify({ type: 'curTime', timeLeft: timeServer.timeLeft }));
+          console.log(`Current time for server ${timeServer.serverId}: ${timeServer.timeLeft}`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
+      case 'startServer':
+        const startServer = servers.find(s => s.serverId === data.serverId);
+        if (startServer) {
+          startServer.nextQuestion(); // Start the first question
+          ws.send(JSON.stringify({ type: 'serverStarted', serverId: startServer.serverId }));
+          console.log(`Server ${startServer.serverId} started`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
+      default:
+        console.log('Unknown message type:', data.type);
+    }
+  });
+
+});
+
+//#endregion
+
+//#region REST API Endpoints
 //all
 app.get('/api/data', (req, res) => {
   db.query('SELECT * FROM users', (err, results) => {
@@ -199,7 +289,6 @@ app.post('/api/quizzes', (req, res) => {
   });
   
 });
-
 //delete quiz
 app.delete('/api/quizzes/:quizId', (req: express.Request<{ quizId: string }>, res: express.Response) => {
   const quizId: string = req.params.quizId;
@@ -220,7 +309,8 @@ app.delete('/api/quizzes/:quizId', (req: express.Request<{ quizId: string }>, re
     res.status(200).json({ message: 'Quiz deleted successfully' });
   });
 });
-
+//#endregion
 app.listen(PORT, () => {
   console.log(`Server running at http://localhost:${PORT}`);
+  console.log(`WebSocket server running at ws://localhost:3002`);
 });
