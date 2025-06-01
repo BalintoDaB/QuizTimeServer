@@ -11,6 +11,8 @@ express.urlencoded({ extended: true });
 app.use(express.json());
 
 import WebSocket, { WebSocketServer } from 'ws';
+import { hostname } from 'os';
+import { time } from 'console';
 const wss = new WebSocketServer({ port: 3002 });
 
 let servers: Server[] = [];
@@ -33,14 +35,14 @@ db.connect(err => {
 //#region WebSocket Server
 wss.on('connection', (ws: WebSocket) => {
 
-  ws.on('message', (message: string) => {
+  ws.on('message', async (message: string) => {
     let data = JSON.parse(message);
     console.log('Received message:', data);
     switch (data.type) {
       case 'createServer':
         const newServer = new Server();
         newServer.serverId = servers.length + 1;
-        newServer.hostId = data.hostId;
+        newServer.hostId = data.hostId; 
         newServer.quizId = data.quizId;
         newServer.timeLimit = data.timeLimit || 30; // Default to 30 seconds if not provided
         newServer.Setup(); // Load questions and answers from the database
@@ -51,32 +53,81 @@ wss.on('connection', (ws: WebSocket) => {
         break;
 
       case 'joinServer':
-        const server = servers.find(s => s.serverId === data.serverId);
+        console.log(data.serverId)
+        const server = servers.find(s => s.serverId == data.serverId);
         if (server) {
-          server.addPlayer(data.playerId);
-          ws.send(JSON.stringify({ type: 'joinedServer', serverId: server.serverId, playerList: server.playerList }));
-          console.log(`Player ${data.playerId} joined server ${server.serverId}`);
+          server.addPlayer(data.userId);
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          wss.clients.forEach(client => {
+            client.send(JSON.stringify({ type: 'playerJoined', hostname: server.hostName, quizName: server.quizName, players: server.playerNames }));
+          });
+          console.log(`Player ${data.userId} joined server ${server.serverId}`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
+      case 'hostJoin':
+        const hostServer = servers.find(s => s.serverId == data.serverId);
+        if (hostServer) {
+          wss.clients.forEach(client => {
+            client.send(JSON.stringify({ type: 'playerJoined', hostname: hostServer.hostName, quizName: hostServer.quizName, players: hostServer.playerNames }));
+          });
+          console.log(`Host ${hostServer.hostName} joined server ${hostServer.serverId}`);
         } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
         }
         break;
 
       case 'nextQuestion':
-        const currentServer = servers.find(s => s.serverId === data.serverId);
+        const currentServer = servers.find(s => s.serverId == data.serverId);
         if (currentServer) {
           currentServer.nextQuestion();
-          ws.send(JSON.stringify({ type: 'nextQuestion', questionIndex: currentServer.currentQuestion }));
-          console.log(`Next question for server ${currentServer.serverId}: ${currentServer.currentQuestion}`);
+          wss.clients.forEach(client => {
+            //check if any more questions are available
+            if (currentServer.getCurrentQuestion() === null) {
+              client.send(JSON.stringify({ type: 'result', serverId: currentServer.serverId }));
+              console.log(`Quiz ended for server ${currentServer.serverId}`);
+            }
+            else{
+              client.send(JSON.stringify({ type: 'question', question: currentServer.getCurrentQuestion(), timeLimit: currentServer.timeLimit }));
+              //send hostQuestion, containing numberOfQuestions, curQuestionIndex, and question
+              client.send(JSON.stringify({
+                type: 'hostQuestion',
+                numberOfQuestions: currentServer.questionData.length,
+                curQuestionIndex: currentServer.currentQuestion,
+                question: currentServer.getCurrentQuestion()
+              }));
+              console.log(`Next question for server ${currentServer.serverId}: ${currentServer.getCurrentQuestion()}`);
+            }
+          });
+          console.log(`Next question for server ${currentServer.serverId}: ${currentServer.getCurrentQuestion()}`);
         } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
         }
         break;
 
+      case 'getQuestion':
+        const questionServer = servers.find(s => s.serverId == data.serverId);
+        if (questionServer) {
+          const question = questionServer.getCurrentQuestion();
+          if (question) {
+            ws.send(JSON.stringify({ type: 'question', question: question, timeLimit: questionServer.timeLimit }));
+            console.log(`Current question for server ${questionServer.serverId}: ${question}`);
+          }
+        }
+        else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
       case 'playerAnswer':
-        const answerServer = servers.find(s => s.serverId === data.serverId);
+        const answerServer = servers.find(s => s.serverId == data.serverId);
         if (answerServer) {
           answerServer.playerAnswer(data.playerId, data.answer);
-          ws.send(JSON.stringify({ type: 'answerReceived', playerId: data.playerId, answer: data.answer }));
+          wss.clients.forEach(client => {
+            client.send(JSON.stringify({ type: 'answerReceived', playerId: data.playerId, answer: data.answer }));
+          });
           console.log(`Player ${data.playerId} answered question ${answerServer.currentQuestion} with answer ${data.answer}`);
         } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
@@ -84,9 +135,12 @@ wss.on('connection', (ws: WebSocket) => {
         break;
 
       case 'curTime':
-        const timeServer = servers.find(s => s.serverId === data.serverId);
+        const timeServer = servers.find(s => s.serverId == data.serverId);
         if (timeServer) {
-          ws.send(JSON.stringify({ type: 'curTime', timeLeft: timeServer.timeLeft }));
+          wss.clients.forEach(client => {
+            client.send(JSON.stringify({ type: 'curTime', timeLeft: timeServer.timeLeft }));
+          });
+          
           console.log(`Current time for server ${timeServer.serverId}: ${timeServer.timeLeft}`);
         } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
@@ -94,11 +148,27 @@ wss.on('connection', (ws: WebSocket) => {
         break;
 
       case 'startServer':
-        const startServer = servers.find(s => s.serverId === data.serverId);
+        const startServer = servers.find(s => s.serverId == data.serverId);
         if (startServer) {
-          startServer.nextQuestion(); // Start the first question
-          ws.send(JSON.stringify({ type: 'serverStarted', serverId: startServer.serverId }));
+          //startServer.nextQuestion(); // Start the first question
+          wss.clients.forEach(client => {
+            client.send(JSON.stringify({ type: 'serverStarted', serverId: startServer.serverId }));
+          });
           console.log(`Server ${startServer.serverId} started`);
+        } else {
+          ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
+        }
+        break;
+
+      case 'getResults':
+        const resultsServer = servers.find(s => s.serverId == data.serverId);
+        console.log(`Getting results for server ${data.serverId}: ${resultsServer?.answers[0].answer}`);
+        if (resultsServer) {
+          const results = resultsServer.getResults();
+          //wait 1.5 seconds to ensure all players have answered
+          await new Promise(resolve => setTimeout(resolve, 1500));
+          ws.send(JSON.stringify({ type: 'results', results }));
+          console.log(`Results for server ${resultsServer.serverId}:`, results);
         } else {
           ws.send(JSON.stringify({ type: 'error', message: 'Server not found' }));
         }
@@ -106,6 +176,7 @@ wss.on('connection', (ws: WebSocket) => {
 
       default:
         console.log('Unknown message type:', data.type);
+        break;
     }
   });
 
@@ -308,6 +379,17 @@ app.delete('/api/quizzes/:quizId', (req: express.Request<{ quizId: string }>, re
 
     res.status(200).json({ message: 'Quiz deleted successfully' });
   });
+});
+//get server ids, quiznames, number of players, host names
+app.get('/api/servers', (req, res) => {
+  const serverData = servers.map(server => ({
+    serverId: server.serverId,
+    quizId: server.quizId,
+    quizName: server.quizName, // Assuming quizId is the name of the quiz
+    numberOfPlayers: server.playerList.length,
+    hostName: server.hostName // Assuming hostId is the name of the host
+  }));
+  res.json(serverData);
 });
 //#endregion
 app.listen(PORT, () => {
